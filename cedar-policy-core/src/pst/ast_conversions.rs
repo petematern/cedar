@@ -548,6 +548,9 @@ impl From<ast::Effect> for Effect {
         match effect {
             ast::Effect::Permit => Effect::Permit,
             ast::Effect::Forbid => Effect::Forbid,
+            // Custom effects map to Permit for PST compatibility
+            // TODO: Full multi-valued decision support in Phase 4
+            ast::Effect::Custom(_) => Effect::Permit,
         }
     }
 }

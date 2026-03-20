@@ -24,7 +24,10 @@ use crate::parser::Loc;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod decision_set;
 mod err;
+
+pub use decision_set::DecisionSet;
 #[cfg(feature = "tolerant-ast")]
 use crate::evaluator::EvaluationError::ASTErrorExpr;
 pub use err::evaluation_errors;

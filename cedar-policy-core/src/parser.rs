@@ -43,6 +43,7 @@ use std::collections::HashMap;
 
 use crate::ast;
 use crate::ast::RestrictedExpressionParseError;
+use crate::entities::decision_registry::DecisionTypeRegistry;
 use crate::est;
 
 /// simple main function for parsing policies
@@ -50,6 +51,24 @@ use crate::est;
 pub fn parse_policyset(text: &str) -> Result<ast::PolicySet, err::ParseErrors> {
     let cst = text_to_cst::parse_policies(text)?;
     cst.to_policyset()
+}
+
+/// Parse policies with support for custom decision types from registry
+/// This allows policies to use custom effect names like `alert`, `validate`, `audit`
+/// in addition to the built-in `permit` and `forbid`.
+///
+/// # Example
+/// ```ignore
+/// let config = DecisionConfig::from_file("decision_config.yaml")?;
+/// let registry = DecisionTypeRegistry::from_config(&config);
+/// let policies = parse_policyset_with_registry(text, &registry)?;
+/// ```
+pub fn parse_policyset_with_registry(
+    text: &str,
+    registry: &DecisionTypeRegistry,
+) -> Result<ast::PolicySet, err::ParseErrors> {
+    let cst = text_to_cst::parse_policies(text)?;
+    cst.to_policyset_with_registry(Some(registry))
 }
 
 /// Like `parse_policyset()`, but also returns the (lossless) original text of
@@ -368,6 +387,8 @@ mod tests {
     use insta::assert_debug_snapshot;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    mod custom_effects;
 
     #[test]
     fn test_template_parsing() {

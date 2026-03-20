@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 /// Module for checking that entities conform with a schema
 pub mod conformance;
+/// Module for decision type registry and multi-valued decisions
+pub mod decision_registry;
 /// Module for error types
 pub mod err;
 pub mod json;

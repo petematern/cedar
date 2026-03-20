@@ -56,6 +56,9 @@ impl TryFrom<est::Policy> for Template {
         let effect = match est_policy.effect {
             ast::Effect::Permit => Effect::Permit,
             ast::Effect::Forbid => Effect::Forbid,
+            // Custom effects map to Permit for EST compatibility
+            // TODO: Full multi-valued decision support in Phase 4
+            ast::Effect::Custom(_) => Effect::Permit,
         };
         let annotations = est_policy
             .annotations

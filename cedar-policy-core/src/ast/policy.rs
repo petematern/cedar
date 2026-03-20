@@ -15,6 +15,7 @@
  */
 
 use crate::ast::*;
+use crate::entities::decision_registry::DecisionTypeId;
 use crate::parser::Loc;
 use annotation::{Annotation, Annotations};
 use educe::Educe;
@@ -2045,10 +2046,12 @@ impl arbitrary::Arbitrary<'_> for PolicyID {
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum Effect {
-    /// this is a Permit policy
+    /// this is a Permit policy (maps to "allow" decision type)
     Permit,
-    /// this is a Forbid policy
+    /// this is a Forbid policy (maps to "deny" decision type)
     Forbid,
+    /// this is a custom decision type (e.g., "alert", "validate", "audit")
+    Custom(DecisionTypeId),
 }
 
 impl std::fmt::Display for Effect {
@@ -2056,7 +2059,100 @@ impl std::fmt::Display for Effect {
         match self {
             Self::Permit => write!(f, "permit"),
             Self::Forbid => write!(f, "forbid"),
+            Self::Custom(id) => write!(f, "effect({})", id.0),
         }
+    }
+}
+
+impl Effect {
+    /// Convert Effect to its corresponding DecisionTypeId
+    ///
+    /// Maps:
+    /// - Permit → DecisionTypeId::ALLOW
+    /// - Forbid → DecisionTypeId::DENY
+    /// - Custom(id) → id
+    pub fn decision_type(&self) -> DecisionTypeId {
+        match self {
+            Self::Permit => DecisionTypeId::ALLOW,
+            Self::Forbid => DecisionTypeId::DENY,
+            Self::Custom(id) => *id,
+        }
+    }
+
+    /// Check if this is a legacy permit/forbid effect
+    ///
+    /// Returns true for Permit and Forbid, false for Custom decision types.
+    /// Used to maintain backward compatibility with existing Cedar policies.
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, Self::Permit | Self::Forbid)
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn test_effect_permit_maps_to_allow() {
+        let effect = Effect::Permit;
+        assert_eq!(effect.decision_type(), DecisionTypeId::ALLOW);
+    }
+
+    #[test]
+    fn test_effect_forbid_maps_to_deny() {
+        let effect = Effect::Forbid;
+        assert_eq!(effect.decision_type(), DecisionTypeId::DENY);
+    }
+
+    #[test]
+    fn test_effect_custom_preserves_id() {
+        let custom_id = DecisionTypeId(100);
+        let effect = Effect::Custom(custom_id);
+        assert_eq!(effect.decision_type(), custom_id);
+    }
+
+    #[test]
+    fn test_effect_is_legacy_permit() {
+        let effect = Effect::Permit;
+        assert!(effect.is_legacy());
+    }
+
+    #[test]
+    fn test_effect_is_legacy_forbid() {
+        let effect = Effect::Forbid;
+        assert!(effect.is_legacy());
+    }
+
+    #[test]
+    fn test_effect_is_legacy_custom() {
+        let effect = Effect::Custom(DecisionTypeId(100));
+        assert!(!effect.is_legacy());
+    }
+
+    #[test]
+    fn test_effect_display_permit() {
+        let effect = Effect::Permit;
+        assert_eq!(format!("{}", effect), "permit");
+    }
+
+    #[test]
+    fn test_effect_display_forbid() {
+        let effect = Effect::Forbid;
+        assert_eq!(format!("{}", effect), "forbid");
+    }
+
+    #[test]
+    fn test_effect_display_custom() {
+        let effect = Effect::Custom(DecisionTypeId(100));
+        assert_eq!(format!("{}", effect), "effect(100)");
+    }
+
+    #[test]
+    fn test_effect_reserved_ids() {
+        // Verify reserved IDs are consistent
+        assert_eq!(DecisionTypeId::ALLOW.0, 0);
+        assert_eq!(DecisionTypeId::DENY.0, 1);
+        assert!(DecisionTypeId::CUSTOM_START >= 100);
     }
 }
 
