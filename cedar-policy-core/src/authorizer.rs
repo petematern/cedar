@@ -21,12 +21,13 @@
 //! the "authorization engine".
 
 use crate::ast::*;
+use crate::entities::decision_registry::DecisionTypeId;
 use crate::entities::Entities;
 use crate::evaluator::Evaluator;
 use crate::extensions::Extensions;
 use itertools::{Either, Itertools};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
@@ -74,7 +75,51 @@ impl Authorizer {
     /// The language spec and formal model give a precise definition of how this is
     /// computed.
     pub fn is_authorized(&self, q: Request, pset: &PolicySet, entities: &Entities) -> Response {
-        self.is_authorized_core(q, pset, entities).concretize()
+        // Delegate to multi-valued API and convert to legacy format
+        self.decisions(q, pset, entities).into_legacy()
+    }
+
+    /// Returns a multi-valued authorization response for `q` with respect to the given `Slice`.
+    ///
+    /// This extended API supports multiple concurrent decision types beyond binary allow/deny.
+    /// For example, a single request can yield both "allow" and "alert" decisions.
+    ///
+    /// The response contains a map of decision types to the policies that returned each decision.
+    /// Use `into_legacy()` to convert to a binary Allow/Deny response for backward compatibility.
+    pub fn decisions(
+        &self,
+        q: Request,
+        pset: &PolicySet,
+        entities: &Entities,
+    ) -> MultiResponse {
+        let partial = self.is_authorized_core(q, pset, entities);
+        Self::partial_to_multi(&partial)
+    }
+
+    /// Convert a PartialResponse to MultiResponse
+    ///
+    /// Groups satisfied policies by their decision type (based on effect).
+    /// Custom effects are currently treated as permits until parser support is added.
+    fn partial_to_multi(partial: &PartialResponse) -> MultiResponse {
+        let mut decisions: HashMap<DecisionTypeId, HashSet<PolicyID>> = HashMap::new();
+
+        // Collect satisfied permits (including custom effects treated as permits)
+        for policy_id in partial.satisfied_permits.keys() {
+            decisions
+                .entry(DecisionTypeId::ALLOW)
+                .or_default()
+                .insert(policy_id.clone());
+        }
+
+        // Collect satisfied forbids
+        for policy_id in partial.satisfied_forbids.keys() {
+            decisions
+                .entry(DecisionTypeId::DENY)
+                .or_default()
+                .insert(policy_id.clone());
+        }
+
+        MultiResponse::new(decisions, partial.errors.clone())
     }
 
     /// Returns an authorization response for `q` with respect to the given `Slice`.
@@ -110,9 +155,11 @@ impl Authorizer {
             let (id, annotations) = (p.id().clone(), p.annotations_arc().clone());
             match eval.partial_evaluate(p) {
                 Ok(Either::Left(satisfied)) => match (satisfied, p.effect()) {
-                    (true, Effect::Permit) => true_permits.push((id, annotations)),
+                    (true, Effect::Permit) | (true, Effect::Custom(_)) => {
+                        true_permits.push((id, annotations))
+                    }
                     (true, Effect::Forbid) => true_forbids.push((id, annotations)),
-                    (false, Effect::Permit) => {
+                    (false, Effect::Permit) | (false, Effect::Custom(_)) => {
                         false_permits.push((id, (ErrorState::NoError, annotations)))
                     }
                     (false, Effect::Forbid) => {
@@ -120,7 +167,7 @@ impl Authorizer {
                     }
                 },
                 Ok(Either::Right(residual)) => match p.effect() {
-                    Effect::Permit => {
+                    Effect::Permit | Effect::Custom(_) => {
                         residual_permits.push((id, (Arc::new(residual), annotations)))
                     }
                     Effect::Forbid => {
@@ -136,9 +183,11 @@ impl Authorizer {
                         ErrorHandling::Skip => false,
                     };
                     match (satisfied, p.effect()) {
-                        (true, Effect::Permit) => true_permits.push((id, annotations)),
+                        (true, Effect::Permit) | (true, Effect::Custom(_)) => {
+                            true_permits.push((id, annotations))
+                        }
                         (true, Effect::Forbid) => true_forbids.push((id, annotations)),
-                        (false, Effect::Permit) => {
+                        (false, Effect::Permit) | (false, Effect::Custom(_)) => {
                             false_permits.push((id, (ErrorState::Error, annotations)))
                         }
                         (false, Effect::Forbid) => {
@@ -186,6 +235,7 @@ impl std::fmt::Debug for Authorizer {
 mod test {
     use super::*;
     use crate::ast::Annotations;
+    use crate::entities::decision_registry::DecisionTypeId;
     use crate::parser;
 
     /// Sanity unit test case for is_authorized.
@@ -643,6 +693,468 @@ mod test {
         assert!(r.residual_permits.contains_key(&PolicyID::from_string("2")));
         assert!(r.residual_forbids.is_empty());
     }
+
+    /// Test MultiResponse backward compatibility conversion with only allow
+    #[test]
+    fn test_multi_response_allow_only() {
+        let mut decisions = HashMap::new();
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("policy1"));
+        allow_policies.insert(PolicyID::from_string("policy2"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies.clone());
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+        let legacy_response = multi_response.into_legacy();
+
+        assert_eq!(legacy_response.decision, Decision::Allow);
+        assert_eq!(legacy_response.diagnostics.reason, allow_policies);
+        assert!(legacy_response.diagnostics.errors.is_empty());
+    }
+
+    /// Test MultiResponse backward compatibility conversion with only deny
+    #[test]
+    fn test_multi_response_deny_only() {
+        let mut decisions = HashMap::new();
+        let mut deny_policies = HashSet::new();
+        deny_policies.insert(PolicyID::from_string("policy3"));
+        decisions.insert(DecisionTypeId::DENY, deny_policies.clone());
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+        let legacy_response = multi_response.into_legacy();
+
+        assert_eq!(legacy_response.decision, Decision::Deny);
+        assert_eq!(legacy_response.diagnostics.reason, deny_policies);
+        assert!(legacy_response.diagnostics.errors.is_empty());
+    }
+
+    /// Test MultiResponse backward compatibility: deny takes precedence over allow
+    #[test]
+    fn test_multi_response_deny_precedence() {
+        let mut decisions = HashMap::new();
+
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("allow1"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies);
+
+        let mut deny_policies = HashSet::new();
+        deny_policies.insert(PolicyID::from_string("deny1"));
+        decisions.insert(DecisionTypeId::DENY, deny_policies.clone());
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+        let legacy_response = multi_response.into_legacy();
+
+        // Deny should take precedence
+        assert_eq!(legacy_response.decision, Decision::Deny);
+        assert_eq!(legacy_response.diagnostics.reason, deny_policies);
+    }
+
+    /// Test MultiResponse backward compatibility: custom decisions ignored in legacy
+    #[test]
+    fn test_multi_response_custom_decisions_ignored() {
+        let mut decisions = HashMap::new();
+
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("allow1"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies.clone());
+
+        // Add custom decision types (alert, validate, etc.)
+        let mut alert_policies = HashSet::new();
+        alert_policies.insert(PolicyID::from_string("alert1"));
+        decisions.insert(DecisionTypeId(100), alert_policies);
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+        let legacy_response = multi_response.into_legacy();
+
+        // Should return Allow (custom decisions ignored)
+        assert_eq!(legacy_response.decision, Decision::Allow);
+        assert_eq!(legacy_response.diagnostics.reason, allow_policies);
+    }
+
+    /// Test MultiResponse backward compatibility: no allow/deny defaults to Deny
+    #[test]
+    fn test_multi_response_no_allow_deny() {
+        let mut decisions = HashMap::new();
+
+        // Only custom decision types, no allow or deny
+        let mut alert_policies = HashSet::new();
+        alert_policies.insert(PolicyID::from_string("alert1"));
+        decisions.insert(DecisionTypeId(100), alert_policies.clone());
+
+        let mut validate_policies = HashSet::new();
+        validate_policies.insert(PolicyID::from_string("validate1"));
+        decisions.insert(DecisionTypeId(101), validate_policies.clone());
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+        let legacy_response = multi_response.into_legacy();
+
+        // Safe default is Deny when no allow/deny present
+        assert_eq!(legacy_response.decision, Decision::Deny);
+        // Reason should include all custom policies
+        assert!(legacy_response.diagnostics.reason.contains(&PolicyID::from_string("alert1")));
+        assert!(legacy_response.diagnostics.reason.contains(&PolicyID::from_string("validate1")));
+    }
+
+    /// Test MultiResponse helper methods
+    #[test]
+    fn test_multi_response_helpers() {
+        let mut decisions = HashMap::new();
+
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("allow1"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies.clone());
+
+        let mut alert_policies = HashSet::new();
+        alert_policies.insert(PolicyID::from_string("alert1"));
+        decisions.insert(DecisionTypeId(100), alert_policies.clone());
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+
+        // Test has_decision
+        assert!(multi_response.has_decision(DecisionTypeId::ALLOW));
+        assert!(multi_response.has_decision(DecisionTypeId(100)));
+        assert!(!multi_response.has_decision(DecisionTypeId::DENY));
+
+        // Test policies_for
+        assert_eq!(
+            multi_response.policies_for(DecisionTypeId::ALLOW),
+            Some(&allow_policies)
+        );
+        assert_eq!(
+            multi_response.policies_for(DecisionTypeId(100)),
+            Some(&alert_policies)
+        );
+        assert_eq!(
+            multi_response.policies_for(DecisionTypeId::DENY),
+            None
+        );
+
+        // Test decision_types
+        let decision_types: Vec<_> = multi_response.decision_types().collect();
+        assert_eq!(decision_types.len(), 2);
+        assert!(decision_types.contains(&DecisionTypeId::ALLOW));
+        assert!(decision_types.contains(&DecisionTypeId(100)));
+    }
+
+    /// Test MultiResponse with errors preserved in legacy conversion
+    #[test]
+    fn test_multi_response_with_errors() {
+        let mut decisions = HashMap::new();
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("policy1"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies);
+
+        let errors = vec![
+            AuthorizationError::PolicyEvaluationError {
+                id: PolicyID::from_string("error_policy"),
+                error: crate::evaluator::EvaluationError::RecursionLimit(
+                    crate::evaluator::evaluation_errors::RecursionLimitError {
+                        source_loc: None,
+                    },
+                ),
+            },
+        ];
+
+        let multi_response = MultiResponse::new(decisions, errors.clone());
+        let legacy_response = multi_response.into_legacy();
+
+        assert_eq!(legacy_response.decision, Decision::Allow);
+        assert_eq!(legacy_response.diagnostics.errors.len(), 1);
+    }
+
+    /// Test decisions() API with simple permit policy
+    #[test]
+    fn test_decisions_permit() {
+        let a = Authorizer::new();
+        let q = Request::new(
+            (EntityUID::with_eid("p"), None),
+            (EntityUID::with_eid("a"), None),
+            (EntityUID::with_eid("r"), None),
+            Context::empty(),
+            None::<&RequestSchemaAllPass>,
+            Extensions::none(),
+        )
+        .unwrap();
+
+        let p_src = r#"
+        permit(principal, action, resource);
+        "#;
+
+        let mut pset = PolicySet::new();
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("1")), p_src).unwrap())
+            .unwrap();
+        let entities = Entities::new();
+
+        // Test multi-valued API
+        let multi_resp = a.decisions(q.clone(), &pset, &entities);
+        assert!(multi_resp.has_decision(DecisionTypeId::ALLOW));
+        assert!(!multi_resp.has_decision(DecisionTypeId::DENY));
+        assert_eq!(multi_resp.decision_types().count(), 1);
+
+        // Verify backward compatibility
+        let legacy_resp = a.is_authorized(q, &pset, &entities);
+        assert_eq!(legacy_resp.decision, Decision::Allow);
+    }
+
+    /// Test decisions() API with forbid policy
+    #[test]
+    fn test_decisions_forbid() {
+        let a = Authorizer::new();
+        let q = Request::new(
+            (EntityUID::with_eid("p"), None),
+            (EntityUID::with_eid("a"), None),
+            (EntityUID::with_eid("r"), None),
+            Context::empty(),
+            None::<&RequestSchemaAllPass>,
+            Extensions::none(),
+        )
+        .unwrap();
+
+        let p_src = r#"
+        forbid(principal, action, resource);
+        "#;
+
+        let mut pset = PolicySet::new();
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("1")), p_src).unwrap())
+            .unwrap();
+        let entities = Entities::new();
+
+        // Test multi-valued API
+        let multi_resp = a.decisions(q.clone(), &pset, &entities);
+        assert!(!multi_resp.has_decision(DecisionTypeId::ALLOW));
+        assert!(multi_resp.has_decision(DecisionTypeId::DENY));
+
+        // Verify backward compatibility
+        let legacy_resp = a.is_authorized(q, &pset, &entities);
+        assert_eq!(legacy_resp.decision, Decision::Deny);
+    }
+
+    /// Test decisions() with both permit and forbid (deny wins)
+    #[test]
+    fn test_decisions_both() {
+        let a = Authorizer::new();
+        let q = Request::new(
+            (EntityUID::with_eid("p"), None),
+            (EntityUID::with_eid("a"), None),
+            (EntityUID::with_eid("r"), None),
+            Context::empty(),
+            None::<&RequestSchemaAllPass>,
+            Extensions::none(),
+        )
+        .unwrap();
+
+        let p1_src = r#"permit(principal, action, resource);"#;
+        let p2_src = r#"forbid(principal, action, resource);"#;
+
+        let mut pset = PolicySet::new();
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("1")), p1_src).unwrap())
+            .unwrap();
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("2")), p2_src).unwrap())
+            .unwrap();
+        let entities = Entities::new();
+
+        // Test multi-valued API - both decisions present
+        let multi_resp = a.decisions(q.clone(), &pset, &entities);
+        assert!(multi_resp.has_decision(DecisionTypeId::ALLOW));
+        assert!(multi_resp.has_decision(DecisionTypeId::DENY));
+        assert_eq!(multi_resp.decision_types().count(), 2);
+
+        // Verify backward compatibility - deny wins
+        let legacy_resp = a.is_authorized(q, &pset, &entities);
+        assert_eq!(legacy_resp.decision, Decision::Deny);
+    }
+
+    /// Test custom decision types conceptually (US2: Validate)
+    /// This demonstrates the validate use case even though parser support is pending
+    #[test]
+    fn test_custom_decision_validate_concept() {
+        use crate::config::{DecisionConfig, DecisionTypeConfig};
+        use crate::entities::decision_registry::DecisionTypeRegistry;
+
+        // Create configuration with validate decision type
+        let config = DecisionConfig {
+            decision_types: vec![
+                DecisionTypeConfig {
+                    name: "allow".to_string(),
+                    precedence: 100,
+                    combinable: true,
+                    exclusive: false,
+                },
+                DecisionTypeConfig {
+                    name: "deny".to_string(),
+                    precedence: 200,
+                    combinable: false,
+                    exclusive: true,
+                },
+                DecisionTypeConfig {
+                    name: "validate".to_string(),
+                    precedence: 60,
+                    combinable: true,
+                    exclusive: false,
+                },
+            ],
+            combination_rules: vec![],
+            conflict_resolution: "precedence".to_string(),
+        };
+
+        let registry = DecisionTypeRegistry::from_config(&config);
+
+        // Verify validate decision type is registered
+        let validate_id = registry.get_id("validate");
+        assert!(validate_id.is_some());
+        assert_eq!(registry.get_name(validate_id.unwrap()), Some("validate"));
+
+        // Verify validate can combine with allow
+        let allow_id = registry.get_id("allow").unwrap();
+        assert!(registry.can_combine(allow_id, validate_id.unwrap()));
+
+        // Simulate multi-valued response with allow + validate
+        let mut decisions = HashMap::new();
+        let mut allow_policies = HashSet::new();
+        allow_policies.insert(PolicyID::from_string("allow_transfer"));
+        decisions.insert(DecisionTypeId::ALLOW, allow_policies);
+
+        let mut validate_policies = HashSet::new();
+        validate_policies.insert(PolicyID::from_string("validate_high_value"));
+        decisions.insert(validate_id.unwrap(), validate_policies);
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+
+        // Both decisions should be present
+        assert!(multi_response.has_decision(DecisionTypeId::ALLOW));
+        assert!(multi_response.has_decision(validate_id.unwrap()));
+        assert_eq!(multi_response.decision_types().count(), 2);
+
+        // Legacy conversion should return Allow (validate is not deny)
+        let legacy = multi_response.into_legacy();
+        assert_eq!(legacy.decision, Decision::Allow);
+    }
+
+    /// Test custom decision types conceptually (US3: Audit)
+    /// This demonstrates audit firing independently of allow/deny
+    #[test]
+    fn test_custom_decision_audit_concept() {
+        use crate::config::{DecisionConfig, DecisionTypeConfig};
+        use crate::entities::decision_registry::DecisionTypeRegistry;
+
+        // Create configuration with audit decision type
+        let config = DecisionConfig {
+            decision_types: vec![
+                DecisionTypeConfig {
+                    name: "allow".to_string(),
+                    precedence: 100,
+                    combinable: true,
+                    exclusive: false,
+                },
+                DecisionTypeConfig {
+                    name: "deny".to_string(),
+                    precedence: 200,
+                    combinable: false,
+                    exclusive: true,
+                },
+                DecisionTypeConfig {
+                    name: "audit".to_string(),
+                    precedence: 40,
+                    combinable: true,
+                    exclusive: false,
+                },
+            ],
+            combination_rules: vec![],
+            conflict_resolution: "precedence".to_string(),
+        };
+
+        let registry = DecisionTypeRegistry::from_config(&config);
+        let audit_id = registry.get_id("audit").unwrap();
+        let deny_id = DecisionTypeId::DENY;
+
+        // Scenario: Deny access but still audit
+        let mut decisions = HashMap::new();
+        let mut deny_policies = HashSet::new();
+        deny_policies.insert(PolicyID::from_string("deny_archived"));
+        decisions.insert(deny_id, deny_policies);
+
+        let mut audit_policies = HashSet::new();
+        audit_policies.insert(PolicyID::from_string("audit_pii_access"));
+        decisions.insert(audit_id, audit_policies);
+
+        let multi_response = MultiResponse::new(decisions, vec![]);
+
+        // Both deny and audit should be present
+        assert!(multi_response.has_decision(deny_id));
+        assert!(multi_response.has_decision(audit_id));
+
+        // Legacy conversion returns Deny (highest precedence)
+        // But audit decision is still available for logging
+        let legacy = multi_response.into_legacy();
+        assert_eq!(legacy.decision, Decision::Deny);
+
+        // Application can still access audit decision from multi_response
+        // before converting to legacy
+    }
+
+    /// Test custom decision types with combination rules (US1: Alert)
+    #[test]
+    fn test_custom_decision_alert_with_rules() {
+        use crate::config::{DecisionConfig, DecisionTypeConfig};
+        use crate::entities::decision_registry::{
+            CombinationRule, CombinationStrategy, DecisionTypeRegistry,
+        };
+
+        // Create configuration with alert and combination rules
+        let config = DecisionConfig {
+            decision_types: vec![
+                DecisionTypeConfig {
+                    name: "allow".to_string(),
+                    precedence: 100,
+                    combinable: true,
+                    exclusive: false,
+                },
+                DecisionTypeConfig {
+                    name: "deny".to_string(),
+                    precedence: 200,
+                    combinable: false,
+                    exclusive: true,
+                },
+                DecisionTypeConfig {
+                    name: "alert".to_string(),
+                    precedence: 50,
+                    combinable: true,
+                    exclusive: false,
+                },
+            ],
+            combination_rules: vec![
+                // Deny excludes everything else
+                CombinationRule {
+                    when: vec!["deny".to_string(), "*".to_string()],
+                    then: CombinationStrategy::Exclusive,
+                    result: Some(vec!["deny".to_string()]),
+                },
+                // Allow and alert can merge
+                CombinationRule {
+                    when: vec!["allow".to_string(), "alert".to_string()],
+                    then: CombinationStrategy::Merge,
+                    result: None,
+                },
+            ],
+            conflict_resolution: "precedence".to_string(),
+        };
+
+        let registry = DecisionTypeRegistry::from_config(&config);
+
+        // Test allow + alert merge
+        let allow_id = registry.get_id("allow").unwrap();
+        let alert_id = registry.get_id("alert").unwrap();
+
+        let resolved = registry.resolve(&[allow_id, alert_id]);
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&allow_id));
+        assert!(resolved.contains(&alert_id));
+
+        // Test deny + alert = only deny (exclusive rule)
+        let deny_id = registry.get_id("deny").unwrap();
+        let resolved = registry.resolve(&[deny_id, alert_id]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], deny_id);
+    }
 }
 
 /// Authorization response returned from the `Authorizer`
@@ -690,6 +1202,94 @@ impl Response {
             decision,
             diagnostics: Diagnostics { reason, errors },
         }
+    }
+}
+
+/// Multi-valued authorization response supporting multiple concurrent decision types
+///
+/// This response type can represent authorization decisions beyond binary allow/deny,
+/// such as "allow + alert" or "allow + validate". It maintains backward compatibility
+/// by providing conversion to the legacy binary `Response` via `into_legacy()`.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct MultiResponse {
+    /// Map of decision type ID to the set of policies that returned that decision
+    pub decisions: HashMap<DecisionTypeId, HashSet<PolicyID>>,
+    /// List of errors that occurred during evaluation
+    pub errors: Vec<AuthorizationError>,
+}
+
+impl MultiResponse {
+    /// Create a new `MultiResponse`
+    pub fn new(
+        decisions: HashMap<DecisionTypeId, HashSet<PolicyID>>,
+        errors: Vec<AuthorizationError>,
+    ) -> Self {
+        Self { decisions, errors }
+    }
+
+    /// Convert multi-valued response to legacy binary Allow/Deny response
+    ///
+    /// Conversion rules:
+    /// - If any "deny" decision exists → Decision::Deny
+    /// - If any "allow" decision exists (and no deny) → Decision::Allow
+    /// - If neither allow nor deny exists → Decision::Deny (safe default)
+    ///
+    /// The `reason` field in the legacy response contains:
+    /// - For Deny: all deny policies (or all policies if deny resulted from no allow)
+    /// - For Allow: all allow policies
+    ///
+    /// All other decision types (alert, validate, audit, etc.) are discarded in the
+    /// legacy conversion, as the binary response cannot represent them.
+    pub fn into_legacy(self) -> Response {
+        let has_deny = self.decisions.contains_key(&DecisionTypeId::DENY);
+        let has_allow = self.decisions.contains_key(&DecisionTypeId::ALLOW);
+
+        let (decision, reason) = if has_deny {
+            // Deny takes precedence (highest precedence by convention)
+            let deny_policies = self
+                .decisions
+                .get(&DecisionTypeId::DENY)
+                .cloned()
+                .unwrap_or_default();
+            (Decision::Deny, deny_policies)
+        } else if has_allow {
+            // Allow if no deny
+            let allow_policies = self
+                .decisions
+                .get(&DecisionTypeId::ALLOW)
+                .cloned()
+                .unwrap_or_default();
+            (Decision::Allow, allow_policies)
+        } else {
+            // No allow or deny decisions → safe default is Deny
+            // Collect all policies from all decision types as contributing reason
+            let all_policies: HashSet<PolicyID> = self
+                .decisions
+                .values()
+                .flat_map(|policies: &HashSet<PolicyID>| policies.iter())
+                .cloned()
+                .collect();
+            (Decision::Deny, all_policies)
+        };
+
+        Response::new(decision, reason, self.errors)
+    }
+
+    /// Check if a specific decision type is present
+    pub fn has_decision(&self, decision_id: DecisionTypeId) -> bool {
+        self.decisions
+            .get(&decision_id)
+            .is_some_and(|policies: &HashSet<PolicyID>| !policies.is_empty())
+    }
+
+    /// Get policies that contributed to a specific decision type
+    pub fn policies_for(&self, decision_id: DecisionTypeId) -> Option<&HashSet<PolicyID>> {
+        self.decisions.get(&decision_id)
+    }
+
+    /// Get all decision types present in this response
+    pub fn decision_types(&self) -> impl Iterator<Item = DecisionTypeId> + '_ {
+        self.decisions.keys().copied()
     }
 }
 

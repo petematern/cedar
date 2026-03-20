@@ -1,0 +1,55 @@
+# Cedar Multi-Valued Decision Configuration Example
+# This configuration defines custom decision types beyond binary permit/forbid
+
+decision_types:
+  # Built-in: allow (maps to Cedar's permit)
+  - name: allow
+    precedence: 100
+    combinable: true
+    exclusive: false
+
+  # Built-in: deny (maps to Cedar's forbid)
+  - name: deny
+    precedence: 200          # Highest precedence - overrides all others
+    combinable: false
+    exclusive: true           # Excludes all other decisions when present
+
+  # Custom: alert (trigger security monitoring)
+  - name: alert
+    precedence: 50
+    combinable: true
+    exclusive: false
+
+  # Custom: validate (require additional verification)
+  - name: validate
+    precedence: 60
+    combinable: true
+    exclusive: false
+
+  # Custom: audit (log access attempt)
+  - name: audit
+    precedence: 40
+    combinable: true
+    exclusive: false
+
+# Combination rules define how decision types interact
+combination_rules:
+  # Deny always wins - excludes all other decisions
+  - when: [deny, "*"]
+    then: exclusive
+    result: [deny]
+
+  # Allow and alert can coexist (e.g., grant access but trigger alert)
+  - when: [allow, alert]
+    then: merge
+
+  # Allow and validate can coexist (e.g., grant access but require 2FA)
+  - when: [allow, validate]
+    then: merge
+
+  # Audit can combine with any decision (logging is independent)
+  - when: [audit, "*"]
+    then: merge
+
+# Conflict resolution strategy
+conflict_resolution: precedence
