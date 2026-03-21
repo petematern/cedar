@@ -54,8 +54,6 @@ pub use crate::entities::decision_registry::CombinationRule;
 ///
 /// Each decision type has properties that control:
 /// - Precedence: Higher values win in conflict resolution
-/// - Combinable: Whether this decision can coexist with others
-/// - Exclusive: Whether this decision excludes all others when present
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecisionTypeConfig {
     /// Name of the decision type (e.g., "allow", "deny", "alert")
@@ -64,12 +62,6 @@ pub struct DecisionTypeConfig {
 
     /// Priority for conflict resolution (higher = higher priority)
     pub precedence: u32,
-
-    /// Whether this decision can coexist with other decisions
-    pub combinable: bool,
-
-    /// Whether this decision excludes other decisions when present
-    pub exclusive: bool,
 }
 
 impl DecisionConfig {
@@ -153,16 +145,6 @@ impl DecisionConfig {
             if !seen_names.insert(dt.name.clone()) {
                 return Err(ConfigError::DuplicateName {
                     name: dt.name.clone(),
-                });
-            }
-
-            // Check for contradictory flags
-            if dt.exclusive && dt.combinable {
-                return Err(ConfigError::ValidationError {
-                    message: format!(
-                        "Decision type '{}' cannot be both exclusive and combinable",
-                        dt.name
-                    ),
                 });
             }
         }
@@ -273,12 +255,8 @@ mod tests {
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -291,8 +269,6 @@ decision_types:
 decision_types:
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -305,16 +281,10 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: allow
     precedence: 50
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -327,38 +297,14 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: Alert
     precedence: 50
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidName { .. })));
-    }
-
-    #[test]
-    fn test_exclusive_and_combinable() {
-        let yaml = r#"
-decision_types:
-  - name: allow
-    precedence: 100
-    combinable: true
-    exclusive: false
-  - name: deny
-    precedence: 200
-    combinable: true
-    exclusive: true
-"#;
-
-        let result = DecisionConfig::from_str(yaml);
-        assert!(matches!(result, Err(ConfigError::ValidationError { .. })));
     }
 
     #[test]
@@ -402,16 +348,10 @@ decision_types: []
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: {}
     precedence: 50
-    combinable: true
-    exclusive: false
 "#,
             long_name
         );
@@ -426,16 +366,10 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: 9alert
     precedence: 50
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -448,16 +382,10 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: alert-notify
     precedence: 50
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -470,24 +398,14 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
   - name: validate
     precedence: 60
-    combinable: true
-    exclusive: false
   - name: audit_log
     precedence: 40
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -503,8 +421,6 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 "#;
 
         let result = DecisionConfig::from_str(yaml);
@@ -517,16 +433,10 @@ decision_types:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
 
 combination_rules:
   - when: [deny, "*"]
@@ -574,20 +484,12 @@ conflict_resolution: precedence
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
   - name: validate
     precedence: 60
-    combinable: true
-    exclusive: false
 
 combination_rules:
   - when: [deny, "*"]
@@ -622,12 +524,8 @@ conflict_resolution: precedence
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 "#;
 
         let config = DecisionConfig::from_str(yaml).expect("Config should parse");

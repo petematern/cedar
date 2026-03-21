@@ -169,12 +169,26 @@ impl DecisionSet {
         self.decisions.is_empty()
     }
 
+    /// Convert DecisionSet into the internal decisions HashMap
+    ///
+    /// Consumes the DecisionSet and returns the underlying HashMap.
+    /// Useful for converting to MultiResponse after applying exclusivity rules.
+    pub fn into_decisions(self) -> HashMap<DecisionTypeId, HashSet<PolicyID>> {
+        self.decisions
+    }
+
     /// Apply exclusivity rules using the registry's combination rules
     ///
     /// This modifies the decision set in-place by removing decisions that
-    /// are excluded by combination rules. For example, if "deny" is exclusive
-    /// and present, all other decisions are removed.
+    /// are excluded by combination rules. Always applies the implicit allow+deny
+    /// rule first, then applies user-defined combination rules from the registry.
     pub fn apply_exclusivity(&mut self) {
+        // IMPLICIT RULE: Allow and Deny cannot coexist (deny wins)
+        if self.has(DecisionTypeId::ALLOW) && self.has(DecisionTypeId::DENY) {
+            self.decisions.remove(&DecisionTypeId::ALLOW);
+        }
+
+        // Apply combination rules from registry
         if let Some(registry) = &self.registry {
             // Get current decision IDs
             let current_ids: Vec<DecisionTypeId> = self.decisions.keys().copied().collect();
@@ -184,16 +198,6 @@ impl DecisionSet {
 
             // Keep only resolved decisions
             self.decisions.retain(|id, _| resolved_ids.contains(id));
-        } else {
-            // Without registry, apply basic exclusive logic
-            // If DENY is present and has exclusive flag, remove all others
-            if self.has(DecisionTypeId::DENY) {
-                let deny_policies = self.decisions.get(&DecisionTypeId::DENY).cloned();
-                self.decisions.clear();
-                if let Some(policies) = deny_policies {
-                    self.decisions.insert(DecisionTypeId::DENY, policies);
-                }
-            }
         }
     }
 }
@@ -209,14 +213,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
             ],
             combination_rules: Vec::new(),
@@ -231,26 +231,18 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "validate".to_string(),
                     precedence: 60,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: Vec::new(),
@@ -400,20 +392,14 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![CombinationRule {
@@ -451,14 +437,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![CombinationRule {
