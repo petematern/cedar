@@ -1,5 +1,5 @@
 // Cedar Multi-Valued Decision Example Policies
-// These demonstrate the extended effect(name) syntax for custom decision types
+// These demonstrate custom decision types using the same syntax as permit/forbid
 
 // =============================================================================
 // Example 1: Security Monitoring with Concurrent Decisions
@@ -16,7 +16,7 @@ permit(
 };
 
 // Alert when sensitive resources are accessed (even if allowed)
-effect(alert)(
+alert(
     principal,
     action == Action::"read",
     resource
@@ -39,7 +39,7 @@ permit(
 };
 
 // Require additional validation for large amounts
-effect(validate)(
+validate(
     principal,
     action == Action::"transfer",
     resource
@@ -53,7 +53,7 @@ effect(validate)(
 // =============================================================================
 
 // Audit all access to resources containing PII (regardless of allow/deny)
-effect(audit)(
+audit(
     principal,
     action,
     resource
@@ -76,7 +76,7 @@ permit(
 };
 
 // Alert on executive access to confidential data
-effect(alert)(
+alert(
     principal,
     action == Action::"view",
     resource
@@ -86,7 +86,7 @@ effect(alert)(
 };
 
 // Require validation for access outside business hours
-effect(validate)(
+validate(
     principal,
     action == Action::"view",
     resource
@@ -95,7 +95,7 @@ effect(validate)(
 };
 
 // Audit all confidential data access
-effect(audit)(
+audit(
     principal,
     action,
     resource

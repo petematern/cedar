@@ -20,29 +20,19 @@ decision_types:
   # Built-in types (required)
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 
   # Custom types
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
 
   - name: validate
     precedence: 60
-    combinable: true
-    exclusive: false
 
   - name: audit
     precedence: 40
-    combinable: true
-    exclusive: false
 
 # Define how decision types interact
 combination_rules:
@@ -60,6 +50,10 @@ combination_rules:
     then: merge
 
 conflict_resolution: precedence
+
+# IMPLICIT RULE (always applied, cannot be overridden):
+# Allow and Deny cannot coexist - if both are present, Allow is removed.
+# When no other rules match, the default behavior is MERGE.
 ```
 
 ### 2. Load Configuration
@@ -92,11 +86,12 @@ let policy_set = /* your policies */;
 let entities = Entities::new();
 let request = /* your authorization request */;
 
-// Call extended API
+// Call extended API with registry
 let multi_response = authorizer.decisions(
     request,
     &policy_set,
     &entities,
+    &registry,
 );
 
 // Check for specific decision types
@@ -126,6 +121,8 @@ match legacy_response.decision {
 
 ## Decision Type Properties
 
+Each decision type has two properties:
+
 ### Precedence
 
 Higher precedence values take priority in conflict resolution:
@@ -141,29 +138,19 @@ Higher precedence values take priority in conflict resolution:
   precedence: 50   # Lowest among these examples
 ```
 
-### Combinable
+### Name
 
-Indicates whether a decision can coexist with others:
+The unique identifier for the decision type (lowercase alphanumeric + underscore).
 
-```yaml
-- name: allow
-  combinable: true   # Can appear with other decisions
+## Default Behavior
 
-- name: deny
-  combinable: false  # Cannot combine (also exclusive)
-```
+**Implicit Rule (Always Applied)**:
+- **Allow and Deny cannot coexist**: If both are present, Allow is automatically removed
+- This rule is hardcoded and cannot be overridden
 
-### Exclusive
-
-When present, excludes all other decisions:
-
-```yaml
-- name: deny
-  exclusive: true    # Only deny remains when present
-
-- name: allow
-  exclusive: false   # Allows other decisions
-```
+**When No Rules Match**:
+- **Default strategy**: MERGE (all decisions coexist)
+- This forces explicit configuration of exclusions via combination rules
 
 ## Combination Rules
 
@@ -215,13 +202,9 @@ This allows audit to combine with any other decision.
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
 
 combination_rules:
   - when: [allow, alert]
@@ -250,13 +233,9 @@ when { resource.classification == "sensitive" };
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
   - name: validate
     precedence: 60
-    combinable: true
-    exclusive: false
 
 combination_rules:
   - when: [allow, validate]
@@ -285,20 +264,17 @@ when { resource.amount > 10000 };
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 
   - name: audit
     precedence: 40
-    combinable: true
-    exclusive: false
 
 combination_rules:
+  - when: [deny, "*"]
+    then: exclusive
+    result: [deny]
   - when: [audit, "*"]
     then: merge
 ```
@@ -374,7 +350,6 @@ Configuration is validated on load:
 - **Required types**: `allow` and `deny` must be present
 - **Name format**: Lowercase alphanumeric + underscore, 1-32 characters
 - **No duplicates**: Decision type names must be unique
-- **No conflicts**: Cannot be both `exclusive` and `combinable`
 
 Any validation failure causes immediate startup failure (fail-fast).
 
@@ -431,13 +406,9 @@ This measures:
 decision_types:
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
   - name: deny
     precedence: 200
-    combinable: false
-    exclusive: true
 ```
 
 ### Invalid Name Format
@@ -445,14 +416,6 @@ decision_types:
 **Error**: `Invalid decision type name 'Alert': Name must contain only lowercase letters`
 
 **Solution**: Use lowercase names: `alert`, `validate`, `audit_log`
-
-### Exclusive and Combinable Conflict
-
-**Error**: `Decision type 'deny' cannot be both exclusive and combinable`
-
-**Solution**: Choose one:
-- `exclusive: true, combinable: false` (deny excludes others)
-- `exclusive: false, combinable: true` (can coexist)
 
 ### Parser Support
 
@@ -477,15 +440,17 @@ decision_types:
    ```yaml
    - name: my_custom_type
      precedence: 70
-     combinable: true
-     exclusive: false
    ```
 
-2. **Define combination rules** if needed:
+2. **Define combination rules** to control interactions:
    ```yaml
    combination_rules:
      - when: [allow, my_custom_type]
        then: merge
+     # Add exclusive rules if needed
+     - when: [my_custom_type, some_other_type]
+       then: exclusive
+       result: [my_custom_type]
    ```
 
 3. **Check for custom decisions** in application code:
@@ -497,6 +462,8 @@ decision_types:
    ```
 
 4. **Restart application** to load new configuration
+
+**Note**: By default, decisions that don't have explicit combination rules will MERGE (coexist). Define explicit rules to create exclusive behaviors.
 
 ## Best Practices
 

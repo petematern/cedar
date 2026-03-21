@@ -1,55 +1,52 @@
-# Cedar Multi-Valued Decision Configuration Example
-# This configuration defines custom decision types beyond binary permit/forbid
+# Cedar Multi-Valued Decision Configuration (Rules-Only Architecture)
+#
+# This configuration demonstrates the simplified rules-only design.
+# Flags (combinable, exclusive) have been removed - use combination_rules instead.
 
 decision_types:
-  # Built-in: allow (maps to Cedar's permit)
+  # Built-in decision types (required)
   - name: allow
     precedence: 100
-    combinable: true
-    exclusive: false
 
-  # Built-in: deny (maps to Cedar's forbid)
   - name: deny
-    precedence: 200          # Highest precedence - overrides all others
-    combinable: false
-    exclusive: true           # Excludes all other decisions when present
+    precedence: 200
 
-  # Custom: alert (trigger security monitoring)
+  # Custom decision types
   - name: alert
     precedence: 50
-    combinable: true
-    exclusive: false
 
-  # Custom: validate (require additional verification)
   - name: validate
     precedence: 60
-    combinable: true
-    exclusive: false
 
-  # Custom: audit (log access attempt)
   - name: audit
     precedence: 40
-    combinable: true
-    exclusive: false
 
-# Combination rules define how decision types interact
+# Combination rules control how decision types interact
 combination_rules:
-  # Deny always wins - excludes all other decisions
+  # Deny is exclusive - when present, it excludes all other decisions
+  # (except the implicit allow+deny rule handles that case automatically)
   - when: [deny, "*"]
     then: exclusive
     result: [deny]
 
-  # Allow and alert can coexist (e.g., grant access but trigger alert)
+  # Allow and alert can coexist (explicit merge)
   - when: [allow, alert]
     then: merge
 
-  # Allow and validate can coexist (e.g., grant access but require 2FA)
+  # Allow and validate can coexist
   - when: [allow, validate]
     then: merge
 
-  # Audit can combine with any decision (logging is independent)
+  # Audit combines with anything (wildcard merge)
   - when: [audit, "*"]
     then: merge
 
 # Conflict resolution strategy
 conflict_resolution: precedence
+
+# IMPLICIT RULE (always applied, cannot be overridden):
+# Allow and Deny cannot coexist - if both are present, Allow is removed.
+# Example: [allow, deny, alert] → [deny, alert]
+#
+# Note: When no other rules match, the default behavior is MERGE
+# (all decisions coexist). Define explicit rules to exclude decisions.

@@ -32,12 +32,6 @@ pub struct DecisionTypeMetadata {
 
     /// Priority for conflict resolution (higher = higher priority)
     pub precedence: u32,
-
-    /// Whether this decision can coexist with other decisions
-    pub combinable: bool,
-
-    /// Whether this decision excludes other decisions when present
-    pub exclusive: bool,
 }
 
 /// Pattern for matching decision types in combination rules
@@ -184,8 +178,6 @@ impl DecisionTypeRegistry {
                 id,
                 name: dt_config.name.clone(),
                 precedence: dt_config.precedence,
-                combinable: dt_config.combinable,
-                exclusive: dt_config.exclusive,
             };
 
             types.insert(dt_config.name.clone(), metadata);
@@ -217,16 +209,12 @@ impl DecisionTypeRegistry {
             id: DecisionTypeId::ALLOW,
             name: "allow".to_string(),
             precedence: 100,
-            combinable: true,
-            exclusive: false,
         });
 
         types.insert("deny".to_string(), DecisionTypeMetadata {
             id: DecisionTypeId::DENY,
             name: "deny".to_string(),
             precedence: 200,
-            combinable: false,
-            exclusive: true,
         });
 
         let id_to_name = vec!["allow".to_string(), "deny".to_string()];
@@ -274,8 +262,8 @@ impl DecisionTypeRegistry {
 
     /// Check if two decision types can be combined
     ///
-    /// Returns true if both decisions can coexist according to their metadata
-    /// and the configured combination rules.
+    /// Returns true if both decisions can coexist according to the implicit
+    /// allow+deny rule and configured combination rules.
     pub fn can_combine(&self, id1: DecisionTypeId, id2: DecisionTypeId) -> bool {
         let meta1 = match self.get_metadata(id1) {
             Some(m) => m,
@@ -287,13 +275,9 @@ impl DecisionTypeRegistry {
             None => return false,
         };
 
-        // If either is exclusive, they cannot combine
-        if meta1.exclusive || meta2.exclusive {
-            return false;
-        }
-
-        // Both must be combinable
-        if !meta1.combinable || !meta2.combinable {
+        // IMPLICIT RULE: Allow and Deny cannot coexist
+        if (id1 == DecisionTypeId::ALLOW && id2 == DecisionTypeId::DENY) ||
+           (id1 == DecisionTypeId::DENY && id2 == DecisionTypeId::ALLOW) {
             return false;
         }
 
@@ -309,7 +293,7 @@ impl DecisionTypeRegistry {
             }
         }
 
-        // Default: allow combination if both are combinable
+        // Default: allow combination (merge strategy)
         true
     }
 
@@ -341,14 +325,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
             ],
             combination_rules: Vec::new(),
@@ -362,26 +342,18 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "validate".to_string(),
                     precedence: 60,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: Vec::new(),
@@ -405,14 +377,10 @@ mod tests {
         let allow_meta = registry.get_metadata(DecisionTypeId::ALLOW).unwrap();
         assert_eq!(allow_meta.name, "allow");
         assert_eq!(allow_meta.precedence, 100);
-        assert!(allow_meta.combinable);
-        assert!(!allow_meta.exclusive);
 
         let deny_meta = registry.get_metadata(DecisionTypeId::DENY).unwrap();
         assert_eq!(deny_meta.name, "deny");
         assert_eq!(deny_meta.precedence, 200);
-        assert!(!deny_meta.combinable);
-        assert!(deny_meta.exclusive);
     }
 
     #[test]
@@ -469,8 +437,6 @@ mod tests {
 
         assert_eq!(alert_meta.name, "alert");
         assert_eq!(alert_meta.precedence, 50);
-        assert!(alert_meta.combinable);
-        assert!(!alert_meta.exclusive);
     }
 
     #[test]
@@ -575,20 +541,14 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![
@@ -620,14 +580,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![
@@ -659,14 +615,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![
@@ -694,14 +646,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
             ],
             combination_rules: vec![],
@@ -724,14 +672,10 @@ mod tests {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "validate".to_string(),
                     precedence: 60,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![

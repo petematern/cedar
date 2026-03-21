@@ -21,9 +21,9 @@
 //! the "authorization engine".
 
 use crate::ast::*;
-use crate::entities::decision_registry::DecisionTypeId;
+use crate::entities::decision_registry::{DecisionTypeId, DecisionTypeRegistry};
 use crate::entities::Entities;
-use crate::evaluator::Evaluator;
+use crate::evaluator::{DecisionSet, Evaluator};
 use crate::extensions::Extensions;
 use itertools::{Either, Itertools};
 use serde::{Deserialize, Serialize};
@@ -75,8 +75,10 @@ impl Authorizer {
     /// The language spec and formal model give a precise definition of how this is
     /// computed.
     pub fn is_authorized(&self, q: Request, pset: &PolicySet, entities: &Entities) -> Response {
+        // Use default registry for backward compatibility
+        let registry = DecisionTypeRegistry::default();
         // Delegate to multi-valued API and convert to legacy format
-        self.decisions(q, pset, entities).into_legacy()
+        self.decisions(q, pset, entities, &registry).into_legacy()
     }
 
     /// Returns a multi-valued authorization response for `q` with respect to the given `Slice`.
@@ -86,39 +88,44 @@ impl Authorizer {
     ///
     /// The response contains a map of decision types to the policies that returned each decision.
     /// Use `into_legacy()` to convert to a binary Allow/Deny response for backward compatibility.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - Decision type registry containing combination rules to apply
     pub fn decisions(
         &self,
         q: Request,
         pset: &PolicySet,
         entities: &Entities,
+        registry: &DecisionTypeRegistry,
     ) -> MultiResponse {
         let partial = self.is_authorized_core(q, pset, entities);
-        Self::partial_to_multi(&partial)
+        Self::partial_to_multi(&partial, registry)
     }
 
     /// Convert a PartialResponse to MultiResponse
     ///
     /// Groups satisfied policies by their decision type (based on effect).
     /// Custom effects are currently treated as permits until parser support is added.
-    fn partial_to_multi(partial: &PartialResponse) -> MultiResponse {
-        let mut decisions: HashMap<DecisionTypeId, HashSet<PolicyID>> = HashMap::new();
+    /// Applies combination rules via DecisionSet to resolve conflicts.
+    fn partial_to_multi(partial: &PartialResponse, registry: &DecisionTypeRegistry) -> MultiResponse {
+        let mut decision_set = DecisionSet::new(registry.clone());
 
         // Collect satisfied permits (including custom effects treated as permits)
         for policy_id in partial.satisfied_permits.keys() {
-            decisions
-                .entry(DecisionTypeId::ALLOW)
-                .or_default()
-                .insert(policy_id.clone());
+            decision_set.add(DecisionTypeId::ALLOW, policy_id.clone());
         }
 
         // Collect satisfied forbids
         for policy_id in partial.satisfied_forbids.keys() {
-            decisions
-                .entry(DecisionTypeId::DENY)
-                .or_default()
-                .insert(policy_id.clone());
+            decision_set.add(DecisionTypeId::DENY, policy_id.clone());
         }
 
+        // CRITICAL: Apply combination rules to resolve conflicts
+        decision_set.apply_exclusivity();
+
+        // Convert DecisionSet to HashMap for MultiResponse
+        let decisions = decision_set.into_decisions();
         MultiResponse::new(decisions, partial.errors.clone())
     }
 
@@ -883,9 +890,10 @@ mod test {
         pset.add_static(parser::parse_policy(Some(PolicyID::from_string("1")), p_src).unwrap())
             .unwrap();
         let entities = Entities::new();
+        let registry = DecisionTypeRegistry::default();
 
         // Test multi-valued API
-        let multi_resp = a.decisions(q.clone(), &pset, &entities);
+        let multi_resp = a.decisions(q.clone(), &pset, &entities, &registry);
         assert!(multi_resp.has_decision(DecisionTypeId::ALLOW));
         assert!(!multi_resp.has_decision(DecisionTypeId::DENY));
         assert_eq!(multi_resp.decision_types().count(), 1);
@@ -917,9 +925,10 @@ mod test {
         pset.add_static(parser::parse_policy(Some(PolicyID::from_string("1")), p_src).unwrap())
             .unwrap();
         let entities = Entities::new();
+        let registry = DecisionTypeRegistry::default();
 
         // Test multi-valued API
-        let multi_resp = a.decisions(q.clone(), &pset, &entities);
+        let multi_resp = a.decisions(q.clone(), &pset, &entities, &registry);
         assert!(!multi_resp.has_decision(DecisionTypeId::ALLOW));
         assert!(multi_resp.has_decision(DecisionTypeId::DENY));
 
@@ -951,12 +960,13 @@ mod test {
         pset.add_static(parser::parse_policy(Some(PolicyID::from_string("2")), p2_src).unwrap())
             .unwrap();
         let entities = Entities::new();
+        let registry = DecisionTypeRegistry::default();
 
-        // Test multi-valued API - both decisions present
-        let multi_resp = a.decisions(q.clone(), &pset, &entities);
-        assert!(multi_resp.has_decision(DecisionTypeId::ALLOW));
+        // Test multi-valued API - with implicit allow+deny rule, only deny remains
+        let multi_resp = a.decisions(q.clone(), &pset, &entities, &registry);
+        assert!(!multi_resp.has_decision(DecisionTypeId::ALLOW)); // Allow removed by implicit rule
         assert!(multi_resp.has_decision(DecisionTypeId::DENY));
-        assert_eq!(multi_resp.decision_types().count(), 2);
+        assert_eq!(multi_resp.decision_types().count(), 1);
 
         // Verify backward compatibility - deny wins
         let legacy_resp = a.is_authorized(q, &pset, &entities);
@@ -976,20 +986,14 @@ mod test {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "validate".to_string(),
                     precedence: 60,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![],
@@ -1042,20 +1046,14 @@ mod test {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "audit".to_string(),
                     precedence: 40,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![],
@@ -1105,20 +1103,14 @@ mod test {
                 DecisionTypeConfig {
                     name: "allow".to_string(),
                     precedence: 100,
-                    combinable: true,
-                    exclusive: false,
                 },
                 DecisionTypeConfig {
                     name: "deny".to_string(),
                     precedence: 200,
-                    combinable: false,
-                    exclusive: true,
                 },
                 DecisionTypeConfig {
                     name: "alert".to_string(),
                     precedence: 50,
-                    combinable: true,
-                    exclusive: false,
                 },
             ],
             combination_rules: vec![
