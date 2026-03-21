@@ -1,0 +1,134 @@
+# Decision Type Configuration Schema
+# Cedar Multi-Valued Authorization Decisions
+
+# ============================================================================
+# MINIMAL EXAMPLE
+# ============================================================================
+
+decision_types:
+  - name: allow
+    precedence: 100
+    combinable: true
+    exclusive: false
+
+  - name: deny
+    precedence: 200
+    combinable: false
+    exclusive: true
+
+conflict_resolution: precedence
+
+# ============================================================================
+# COMPLETE EXAMPLE (Financial Services)
+# ============================================================================
+
+decision_types:
+  # Built-in allow/deny
+  - name: allow
+    precedence: 100
+    combinable: true
+    exclusive: false
+
+  - name: deny
+    precedence: 200    # Highest - overrides all
+    combinable: false
+    exclusive: true
+
+  # Security monitoring
+  - name: alert
+    precedence: 50
+    combinable: true
+    exclusive: false
+
+  # Additional verification
+  - name: validate
+    precedence: 60
+    combinable: true
+    exclusive: false
+
+  # Audit logging
+  - name: audit
+    precedence: 40
+    combinable: true
+    exclusive: false
+
+combination_rules:
+  - when: [deny, "*"]
+    then: exclusive
+    result: [deny]
+
+  - when: [allow, alert]
+    then: merge
+
+  - when: [allow, validate]
+    then: merge
+
+  - when: [audit, "*"]
+    then: merge
+
+conflict_resolution: precedence
+
+# ============================================================================
+# FIELD DESCRIPTIONS
+# ============================================================================
+
+# decision_types: (REQUIRED)
+#   name: lowercase alphanumeric + underscore, 1-32 chars, unique
+#   precedence: 0 to 4294967295 (higher = higher priority)
+#   combinable: can coexist with other decisions
+#   exclusive: excludes other decisions when present
+#
+# combination_rules: (OPTIONAL)
+#   when: list of decision names or "*" wildcard
+#   then: "merge" | "exclusive" | "override"
+#   result: list of decision names (required for exclusive/override)
+#
+# conflict_resolution: (OPTIONAL, default: precedence)
+#   "precedence" | "error" | "merge"
+
+# ============================================================================
+# VALIDATION RULES (FAIL-FAST per clarification)
+# ============================================================================
+
+# 1. File MUST exist (fail startup if missing per clarification)
+# 2. "allow" and "deny" MUST be present
+# 3. Names MUST be unique (case-insensitive)
+# 4. exclusive=true implies combinable=false
+# 5. Combination rules MUST reference existing decision types
+# 6. No circular dependencies in combination rules
+
+# ============================================================================
+# OPERATIONAL NOTES (from clarifications)
+# ============================================================================
+
+# - Configuration file MUST exist at startup (fail-fast on missing)
+# - Updates require application restart (no hot-reload)
+# - Clear error messages with path and remedy if file missing or invalid
+# - Use rolling restarts for zero-downtime updates in production
+
+# ============================================================================
+# ERROR EXAMPLES
+# ============================================================================
+
+# If file missing:
+#   Error: Configuration file not found: decision_config.yaml
+#     Configuration is required for multi-valued decision support.
+#     Create the file or provide path with --config option.
+
+# If invalid YAML:
+#   Error: Invalid YAML syntax at line 15, column 3
+#     Expected mapping key, found sequence
+
+# If semantic error:
+#   Error: Duplicate decision type name 'allow'
+#     First defined at line 5, duplicated at line 12
+
+# ============================================================================
+# DEPLOYMENT PATTERN (per clarification)
+# ============================================================================
+
+# 1. Edit this file
+# 2. Validate with tests: cargo test config_validation
+# 3. Deploy updated file to production
+# 4. Restart application (rolling restart for zero-downtime)
+# 5. Verify startup logs show successful config load
