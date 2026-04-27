@@ -142,6 +142,37 @@ If you're looking to integrate Cedar into a production system, please be sure to
 
 To build, simply run `cargo build` (or `cargo build --release`).
 
+## Optional Dependencies
+
+### cvc5 SMT Solver
+
+The `cedar-policy-symcc` crate provides formal verification capabilities for Cedar policies using symbolic execution. This requires the [cvc5 SMT solver](https://cvc5.github.io/) (version 1.2.1) as an external dependency.
+
+**When is cvc5 needed?**
+- Running tests in the `cedar-policy-symcc` package
+- Using symbolic verification features (e.g., formally proving policy properties like "never errors" or "always allows")
+- The core Cedar policy engine and other crates work without cvc5
+
+**Installation:**
+
+1. Download the appropriate binary for your platform from the [cvc5 1.2.1 release](https://github.com/cvc5/cvc5/releases/tag/cvc5-1.2.1):
+   - **macOS (Apple Silicon):** `cvc5-macOS-arm64-static.zip`
+   - **macOS (Intel):** `cvc5-macOS-x86_64-static.zip`
+   - **Linux (x86_64):** `cvc5-Linux-x86_64-static.zip`
+   - **Linux (ARM64):** `cvc5-Linux-arm64-static.zip`
+
+2. Extract and place the binary in your PATH, or set the `CVC5` environment variable:
+   ```sh
+   export CVC5=/path/to/cvc5-1.2.1/bin/cvc5
+   ```
+
+3. Verify installation:
+   ```sh
+   $CVC5 --version  # Should output: cvc5 version 1.2.1
+   ```
+
+For detailed usage examples and API documentation, see the [cedar-policy-symcc README](./cedar-policy-symcc/README.md).
+
 ## What's New
 
 We maintain changelogs for our public-facing crates:

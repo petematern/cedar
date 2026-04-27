@@ -117,8 +117,8 @@ impl CompiledPolicy {
                     // a singleton pset with only a forbid policy, always denies everything
                     false.into()
                 }
-                Effect::Permit => {
-                    // a singleton pset with only a permit policy, allows iff that policy evaluates to some(true)
+                Effect::Permit | Effect::Custom(_) => {
+                    // a singleton pset with only a permit or custom policy, allows iff that policy evaluates to some(true)
                     factory::eq(self.term, factory::some_of(true.into()))
                 }
             },

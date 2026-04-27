@@ -137,7 +137,7 @@ impl<'a> Response<'a> {
                         residual_forbids.insert(id);
                     }
                 }
-                Effect::Permit => {
+                Effect::Permit | Effect::Custom(_) => {
                     if r.is_true() {
                         satisfied_permits.insert(id);
                     } else if r.is_false() || r.is_error() {
